@@ -4,6 +4,10 @@
 
 #include <Arduino.h>
 
+// "settings"
+#define AXL_QUEUE_LEN 32
+#define AXL_MAX_DOF 7 
+
 // it's all modes to me, baby 
 #define AXL_MODE_ACCEL 1
 #define AXL_MODE_VELOCITY 2
@@ -16,8 +20,14 @@
 #define AXL_QUEUESTATE_RUNNING 3
 #define AXL_QUEUESTATE_INCREMENTING 4 
 
-#define AXL_QUEUE_LEN 32
-#define AXL_MAX_DOF 7 
+// halt conditions, 
+#define AXL_HALT_NONE 0 
+#define AXL_HALT_SOFT 1 
+#define AXL_HALT_CASCADE 3 
+#define AXL_HALT_ACK_NOT_PICKED 4
+#define AXL_HALT_MOVE_COMPLETE_NOT_PICKED 5
+#define AXL_HALT_BUFFER_STARVED 6
+#define AXL_HALT_OUT_OF_ORDER_ARRIVAL 7 
 
 // struct for motion-state handoff 
 typedef struct axlState_t {
@@ -54,6 +64,9 @@ void axl_init(uint16_t microsecondsPerIntegration);
 // integrator 
 void axl_integrate(void);
 
+// get states 
+void axl_getCurrentStates(axlState_t* statePtr);
+
 // set modal targets
 void axl_setPositionTarget(float _targ, float _maxVel, float _maxAccel);
 void axl_setVelocityTarget(float _targ, float _maxAccel);
@@ -65,6 +78,7 @@ void axl_addSegmentToQueue(axlPlannedSegment_t move);
 uint16_t axl_getSegmentAckMsg(uint8_t* msg);
 uint16_t axl_getSegmentCompleteMsg(uint8_t* msg);
 
-void axl_getCurrentStates(axlState_t* statePtr);
+// halt-and-latch, not implemented, but needed in fullness of lossy-link time 
+void axl_halt(uint8_t haltCode);
 
 #endif 

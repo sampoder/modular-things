@@ -1,5 +1,6 @@
 #include "axlStateMachine.h"
 #include "stepperDriver.h"
+#include <core/ts.h>
 
 // ---------------------------------------------- stopping criteria... 
 #define POS_EPSILON 0.01F
@@ -21,20 +22,35 @@ volatile float absMaxVelocity = 10.0F;
 // ---------------------------------------------- ~ core states 
 // states (units are steps, 1=1 ?) 
 volatile uint8_t mode = AXL_MODE_QUEUE;
-volatile uint8_t queueState = AXL_QUEUESTATE_EMPTY;
 volatile float pos = 0.0F;                // current position 
 volatile float vel = 0.0F;                // current velocity 
 volatile float accel = 0.0F;              // current acceleration 
+volatile float segDistance = 0.0F;
+volatile float segDelta = 0.0F;
+volatile float segStopDistance = 0.0F;
+volatile float segVel = 0.0F;
+volatile float segAccel = 0.0F;
 
 // ---------------------------------------------- queues 
+volatile uint8_t queueState = AXL_QUEUESTATE_EMPTY;
 axlPlannedSegment_t queue[AXL_QUEUE_LEN];
-axlPlannedSegment_t* queueHead; // ingest here, 
-axlPlannedSegment_t* queueTail; // operate here, 
-uint32_t queueStartDelayMS = 500;
-uint32_t queueStartTime = 0;
+volatile axlPlannedSegment_t* queueHead;   // ingest here, 
+volatile axlPlannedSegment_t* queueTail;   // operate here, 
+uint32_t queueStartDelayMS = 500; // time between empty-queue to start-of-first, to allow ingestion 
+volatile uint32_t queueStartTime = 0;      // when to start ? 
+volatile uint32_t nextSegmentNumber = 0;   // what's the next segment we expect ? to guard out-of-order arrival 
+
+// ---------------------------------------------- we have some outbound messages
+// for sure this is not RAM-friendly, wherps 
+uint8_t segmentAckMsg[128];
+uint16_t segmentAckMsgLen = 0;
+uint8_t segmentCompleteMsg[128];
+volatile uint16_t segmentCompleteMsgLen = 0;
+uint8_t haltMsg[128];
+uint16_t haltMsgLen = 0;
 
 // ---------------------------------------------- axl dof-to-motor linkage, 
-uint8_t ourActuatorID = 0;
+uint8_t ourActuatorIndice = 0;
 
 // this is the "limit" pin, currently used as a debug, 
 #define PIN_TICK 22
@@ -111,6 +127,118 @@ void TC5_Handler(void){
 }
 
 void axl_integrate(void){
+  // check if we have / are within a valid move, 
+  if(!(queueTail->isReady)) return;
+  // past this point we have at least one move to make, 
+  switch(queueState){
+    case AXL_QUEUESTATE_RUNNING: // we were previously running, carry on:
+      break;
+    case AXL_QUEUESTATE_EMPTY: // we were previously empty, this is new, setup the delay: 
+      segDistance = 0.0F;
+      queueState = AXL_QUEUESTATE_AWIATING_START;
+      queueStartTime = millis() + queueStartDelayMS;
+      return;
+    case AXL_QUEUESTATE_AWIATING_START:  // we have setup the delay, are now waiting... 
+      if(millis() > queueStartTime){
+        queueState = AXL_QUEUESTATE_INCREMENTING;
+      }
+      return;
+    case AXL_QUEUESTATE_INCREMENTING:
+      // we've just collected a new tail, so we should do 
+      segVel = queueTail->vi; 
+      segAccel = queueTail->accel; // although this statemachine decides this again... 
+      queueState = AXL_QUEUESTATE_RUNNING;
+      // OSAP::debug("vi:\t" + String(queueTail->vi, 2) + "\tvf:\t" + String(queueTail->vf, 2) + "\tdst:\t" + String(queueTail->distance, 2));
+      break;
+    default:
+      break;
+  }
+  // we want to know if it's time to start stopping... so, we have 
+  // vf^2 = vi^2 + 2ad 
+  // vf^2 - vi^2 = 2ad
+  // note that accel is always +ve in the move, and here we are considering deceleration, so it flips 
+  // stopDistance will be -ve when vf > vi, i.e. when the move is accelerating... 
+  segStopDistance = ((queueTail->vf * queueTail->vf) - (segVel * segVel)) / (2 * queueTail->accel);
+  // we have a distance-to-end: total length of move - distance traversed along move so far, 
+  segDelta = queueTail->distance - segDistance;
+  // if we are just past stopping distance, we should start slowing down 
+  // (ideally we would anticipate the next integral, so that we don't overshoot *at all*)
+  if(stopDistance > abs(segDelta)){
+    segAccel = -queueTail->accel;
+  } else {
+    segAccel = queueTail->accel;
+  }
+  // OSAP::debug("stopdist:\t" + String(stopDistance, 2) + "\t" + String(segTail->distance - segDistance));
+  // then we want to integrate our linear velocity,
+  segVel += segAccel * delT;
+  // no negative rates, that would be *erroneous* and also *bad* 
+  if(segVel < -0.001F){
+    segVel = 0.0F;
+    // OSAP::error("negative rate " + String(segVel), MEDIUM);
+    return;
+  }
+  // and hit vmax ceilings, 
+  if(segVel > queueTail->vmax) segVel = queueTail->vmax;
+  // integrate per-segment position, 
+  segDistance += segVel * delT;
+  // now do integrations over space ? for our "picked" axis, 
+  // our velocity on this axis is yonder:
+  vel = segVel * queueTail->unit[ourActuatorIndice];
+  // we have an on-axis position delta:
+  segDelta = vel * delT;
+  // we stash it in our position state, 
+  pos += segDelta;
+  // and we use that to operate our stepper: 
+  stepModulo += segDelta;
+  if(stepModulo >= 1.0F){
+    stepper_step(microsteps, true);
+    stepModulo -= 1.0F;
+  } else if (stepModulo <= -1.0F){
+    stepper_step(microsteps, false);
+    stepModulo += 1.0F;
+  }
+  // check check, 
+  // OSAP::debug("vel: " + String(segVel, 2) + " stopDist: " + String(stopDistance, 2) + " dist:" + String(segDistance, 2));
+  // -------------------------------------------- Check Segment Completion 
+  // are we done? goto the next move,
+  if(segDistance >= queueTail->distance){
+    // this move gets a reset, so queue observers know it's "empty" 
+    queueTail->isReady = false;
+    queueTail->isRunning = false;
+    // make a segment-complete-ack, 
+    // was previous ack picked up in time ? bad if not 
+    // also could implement windowed... so, just write most-recently-completed move
+    // TODO should do that above, but consider also the bus-use case, how do they work together ? 
+    if(segmentCompleteMsgLen != 0){
+      axl_halt(AXL_HALT_MOVE_COMPLETE_NOT_PICKED);
+    }
+    // otherwise carry on, 
+    segmentCompleteMsgLen = 0;
+    // segment #, and our actuator ID... 
+    ts_writeUint32(queueTail->segmentNumber, segmentCompleteMsg, &segmentCompleteMsgLen);
+    // that's it, the ack will be picked up... 
+    // before we increment, stash this extra distance into the next segment... 
+    segDistance = segDistance - queueTail->distance;
+    // was it the last ?
+    boolean wasLastMove = queueTail->isLastSegment;
+    // now increment the pointer, 
+    queueTail = queueTail->next;
+    // is that ready ? then grab another, if not, set moves-complete, 
+    if(!queueTail->isReady){
+      // if this is true and our velocities != 0, we are probably starved:
+      if(!wasLastMove) axl_halt(AXL_HALT_BUFFER_STARVED);
+      // we're empty now, so 
+      queueState = AXL_QUEUESTATE_EMPTY;
+      // and set velocity to 0, 
+      vel = 0.0F;
+      // if we're empty, don't goto pickup, just bail... 
+      return; 
+    } else {
+      queueState = AXL_QUEUESTATE_INCREMENTING;
+      queueTail->isRunning = true;
+    }
+  } // end is-move-complete section, 
+  // -------------------------------------------- Integrate -> States... 
   // // set our accel based on modal requests, 
   // switch(mode){
   //   case MOTION_MODE_POS:
@@ -160,16 +288,98 @@ void axl_integrate(void){
   // // integrate posn with delta 
   // pos += delta;
   // Serial.println(String(pos) + " " + String(vel) + " " + String(accel) + " " + String(distanceToTarget));
-  // and check in on our step modulo, 
-  stepModulo += delta;
-  if(stepModulo >= 1.0F){
-    stepper_step(microsteps, true);
-    stepModulo -= 1.0F;
-  } else if (stepModulo <= -1.0F){
-    stepper_step(microsteps, false);
-    stepModulo += 1.0F;
-  }
+  // // and check in on our step modulo, 
+  // stepModulo += delta;
+  // if(stepModulo >= 1.0F){
+  //   stepper_step(microsteps, true);
+  //   stepModulo -= 1.0F;
+  // } else if (stepModulo <= -1.0F){
+  //   stepper_step(microsteps, false);
+  //   stepModulo += 1.0F;
+  // }
 } // end integrator 
+
+// ---------------------------------------------- ingest moves 
+void axl_addSegmentToQueue(axlPlannedSegment_t segment){
+  // get a handle for the next, 
+  // and if it's marked as "ready" - it means queue is full and this is borked, 
+  if(queueHead->isReady){
+    // OSAP::error("on moveToQueue, looks full ahead", MEDIUM);
+    return;
+  }
+  // we have some trust issues:
+  if(segment.distance <= 0.0F){
+    // OSAP::error("zero distance move", MEDIUM);
+    return;
+  }
+  // then we just stick it in there, don't we, trusting others... 
+  // since we to queueHead->isReady = true *at the end* we 
+  // won't have the integrator step into this block during an interrupt... 
+  // kind of awkward copy, innit? 
+  // anyways these are the vals we get from the net:
+  queueHead->segmentNumber = segment.segmentNumber;
+  if(nextSegmentNumber != queueHead->segmentNumber){
+    axl_halt(AXL_HALT_OUT_OF_ORDER_ARRIVAL);
+    // haltMessage = " rx'd " + String(segment.segmentNumber) + " expected " + String(nextSegmentNumber);
+  } else {
+    nextSegmentNumber ++; 
+  }
+  // is it the last... 
+  queueHead->isLastSegment = segment.isLastSegment;
+  // collect the unit vector, just all, every time, for now,
+  // future implementations (which are packet-friendlier) would use dof_in_use or something
+  for(uint8_t a = 0; a < AXL_MAX_DOF; a ++){
+    queueHead->unit[a] = segment.unit[a];
+  }
+  // segment trajectory described with... 
+  queueHead->distance = segment.distance;
+  queueHead->vi = segment.vi; 
+  queueHead->accel = segment.accel;
+  queueHead->vmax = segment.vmax;
+  queueHead->vf = segment.vf;
+  // and formulate our ack message... 
+  // was previous ack picked up in time ? bad if not 
+  if(segmentAckMsgLen != 0){
+    axl_halt(AXL_HALT_MOVE_COMPLETE_NOT_PICKED);
+  }
+  // otherwise carry on & write it... 
+  // segment #, and our actuator ID... 
+  ts_writeUint32(queueHead->segmentNumber, segmentAckMsg, &segmentAckMsgLen);
+  noInterrupts();
+  // and set these to allow read-out of the move
+  queueHead->isReady = true;
+  // and increment, 
+  queueHead = queueHead->next;
+  // if it isn't already: 
+  mode = AXL_MODE_QUEUE;
+  interrupts();
+}
+
+uint16_t axl_getSegmentAckMsg(uint8_t* msg){
+  if(segmentAckMsgLen > 0){
+    __disable_irq();
+    memcpy(msg, segmentAckMsg, segmentAckMsgLen);
+    uint16_t len = segmentAckMsgLen;
+    segmentAckMsgLen = 0;
+    __enable_irq();
+    return len;
+  } else {
+    return 0;
+  }
+}
+
+uint16_t axl_getSegmentCompleteMsg(uint8_t* msg){
+  if(segmentCompleteMsgLen > 0){
+    __disable_irq();
+    memcpy(msg, segmentCompleteMsg, segmentCompleteMsgLen);
+    uint16_t len = segmentCompleteMsgLen;
+    segmentCompleteMsgLen = 0;
+    __enable_irq();
+    return len;
+  } else {
+    return 0;
+  }
+}
 
 void axl_setPositionTarget(float _targ, float _maxVel, float _maxAccel){
 
@@ -190,3 +400,6 @@ void axl_getCurrentStates(axlState_t* statePtr){
   statePtr->accel = accel;
   interrupts();
 }
+
+// not yet implemented, 
+void axl_halt(uint8_t haltCode){};

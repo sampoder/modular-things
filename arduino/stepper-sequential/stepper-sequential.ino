@@ -15,22 +15,13 @@ VPort_ArduinoSerial vp_arduinoSerial(&osap, "usbSerial", &Serial);
 // ---------------------------------------------- 1th Vertex: Modal Inputs
 // position- or velocity- targets... 
 EP_ONDATA_RESPONSES onModalData(uint8_t* data, uint16_t len){
-
+  // not in this version, yet 
   return EP_ONDATA_ACCEPT;
 }
 
 Endpoint modalInputsEndpoint(&osap, "modalIngest", onModalData);
 
-// ---------------------------------------------- 2nd Vertex: Queue Inputs 
-// new queue-moves, and WAIT if full  
-EP_ONDATA_RESPONSES onQueueData(uint8_t* data, uint16_t len){
-
-  return EP_ONDATA_ACCEPT;
-}
-
-Endpoint queueInputsEndpoint(&osap, "queueIngest", onQueueData);
-
-// ---------------------------------------------- 3rd Vertex: Motion State Read 
+// ---------------------------------------------- 2nd Vertex: Motion State Read 
 // queries only, more or less, so
 EP_ONDATA_RESPONSES onMotionStateData(uint8_t* data, uint16_t len){ return EP_ONDATA_REJECT; }
 boolean beforeMotionStateQuery(void);
@@ -73,13 +64,50 @@ EP_ONDATA_RESPONSES onSettingsData(uint8_t* data, uint16_t len){
 
 Endpoint settingsEndpoint(&osap, "settings", onSettingsData);
 
+// ---------------------------------------------- 4th Vertex: Queue Inputs 
+// adds new moves, doesn't flow-control input, that's application-level window 
+EP_ONDATA_RESPONSES onQueueData(uint8_t* data, uint16_t len){
+  // make a segment to copy-inot, 
+  axlPlannedSegment_t segment;
+  uint16_t rptr = 0;
+  // location of segment-in-sequence, to count continuity, 
+  segment.segmentNumber = ts_readUint32(data, &rptr);
+  // is it the end of this stream ?
+  segment.isLastSegment = ts_readBoolean(data, &rptr);
+  // OSAP::debug("segnum, isLast " + String(segment.segmentNumber) + ", " + String(segment.isLastSegment));
+  // unit vector describing segment's direction, in all-dof space, 
+  for(uint8_t a = 0; a < AXL_MAX_DOF; a ++){
+    segment.unit[a] = ts_readFloat32(data, &rptr);
+  }
+  // start vel, accel-rate (up, and down), max velocity, final velocity, distance (all +ve)
+  segment.vi = ts_readFloat32(data, &rptr);
+  segment.accel = ts_readFloat32(data, &rptr);
+  segment.vmax = ts_readFloat32(data, &rptr);
+  segment.vf = ts_readFloat32(data, &rptr);
+  segment.distance = ts_readFloat32(data, &rptr);
+  // add yonder,
+  axl_addSegmentToQueue(segment);
+  // that's it, but don't copy-in, 
+  return EP_ONDATA_REJECT;
+}
+
+Endpoint queueIngestEndpoint(&osap, "queueIngest", onQueueData);
+
+// ---------------------------------------------- 6th Vertex: Segment rx-ack
+
+Endpoint segmentAckOutEP(&osap, "segmentAcks");
+
+// ---------------------------------------------- 7th Vertex: Segment complete-ack 
+
+Endpoint segmentCompleteOutEP(&osap, "segmentComplete");
+
 // ---------------------------------------------- 5th Vertex: Limit / Switch Output... non-op at the moment, 
 
 // fair warning, this is unused at the moment... and not set-up, 
 // also the limit pin is config'd to look at the interrupt on a scope at the moment, see motionStateMachine.cpp 
 Endpoint buttonEndpoint(&osap, "buttonState");
 
-void setup() {
+void setup() {  
   Serial.begin(0);
   // ~ important: the stepper code initializes GCLK4, which we use as timer-interrupt
   // in the motion system, so it aught to be initialized first ! 
@@ -99,8 +127,20 @@ void setup() {
   vp_arduinoSerial.begin();
 }
 
+uint8_t axlData[128];
+uint16_t axlDataLen = 0;
+
 void loop() {
   // do graph stuff
   osap.loop();
   // check for messages from motion system ?
+  axlDataLen = axl_getSegmentAckMsg(axlData);
+  if(axlDataLen){
+    segmentAckOutEP.write(axlData, axlDataLen);
+  }
+  // check for queueSegmentComplete 
+  axlDataLen = axl_getSegmentCompleteMsg(axlData);
+  if(axlDataLen){
+    segmentCompleteOutEP.write(axlData, axlDataLen);
+  }
 }
