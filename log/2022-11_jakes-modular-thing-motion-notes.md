@@ -90,3 +90,38 @@ When I get back, then,
 Sheesh: OK, I think it's, like, done, and I want to try wiring it to a machine, and try also the position-target-setting-on-the-fly. 
 
 OK - I have the circles-thing up again, with... a new API? IDK - I'm going to try next a floating-target example, with a potentiometer maybe ~ or something, lol, then call it and start doing the organizing, etc. 
+
+## 2022 12 04 
+
+OK I wanted to see if I could whip sequential motion into this thing... I think it means ~ copypasta some from the axl project, but simpler piping, but still some wiring up / down etc. 
+
+I think, since this is ~ something of a pairing-down exercise, I'll try a simple motor code that *just* does sequences, then we can see about merging them togther later on. 
+
+Let's see: 
+
+- we send pre-calculated segments 
+- we get an ack when they're ingested (flow-controlled)
+- we get a "done" when they're done moving 
+- we do windowed: when we get "done" from seg `n`, we are txing seg `n + queue_len` -> OK 
+
+That's kind of it, innit? So we need to tx segments down, which should be ~ vi, accel, vmax, dist (delta), vf, that's it. The awkward things are, like, rx'ing segments that are not-along-our-axis... so we might need a better segment rep, i.e. one that includes like `segment_execution_time` ??? 
+
+The current AXL implementation handles this by sending the whole gd axis count down... other implementations use step-based representations, like `steps_to_accel, steps_to_cruise, steps_until_decel`, then just state-machine their way thru moves, doing the nasty calculations up front. 
+
+I ~ kind of like the current AXL implementation, at least until we get up to ~ the ideal spline-implementation. Segments, everyone steps thru 'em together, etc. It means sucking down 6-DOF (as a fixed count) of motion in each segment, though, so it'll bake through RAM. The E18A has only 32kb of RAM, so let's see... if a move has 5x floats (vi, vf, vmax, accel, dist), then 6x dof, we have 30 * 4 = 120 bytes per segment (at least), then for ~ 32 segments we suck 4k ram into the queue alone... it's a bit greedy, innit, but it might be the move for the time being, since we know it to work pretty well in AXL? 
+
+And - wait - it isn't that eggregious: we have NDOF x 1 for the unit vector, then 1x each other. So this is actually a totally sane way to do this, and I think I will do, thank you very much. So I can do 7 DOF (for a robot arm +1, idk lol) - seems like more than we would ever need, future folks can go ++ if they'd like. 
+
+## 2022 12 05 
+
+OK it's time-oclock to actually implement this... being a little more flash-savvy now. I guess on the outer loop I should get my plumbing together, then the queueing system itself (?), then setup a test... thing, I guess in modular-thing, shackles and all. 
+
+So, first off, thinking of renaming this to axlStateMachine, etc, for me. Will do that. 
+
+---
+
+- rename, etc 
+- addToQueue.h 
+- later
+  - do split-screen demos 
+  - do .setSPU, .setCSCale -> .setStepsPerUnit, .setCurrent
