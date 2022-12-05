@@ -81,6 +81,28 @@ export default function createSynchronizer(actuators) {
   // sometimes we know this, and that can speed things up, other times we are unawares 
   let lastAbsolute = null
 
+  // -------------------------------------------- Queues... 
+  let segComplete = (a, num) => {
+    // will pop from list here, check against all-else, etc... 
+    console.warn(`synchronizer rx complete from ${a}, num ${num}`)
+  }
+  for(let a = 0; a < actuators.length; a ++){
+    actuators[a].attachSegmentCompleteFn((data) => {
+      let segNum = TS.read("uint32", data, 0)
+      segComplete(a, segNum)
+    })
+  }
+  let AXL_MAX_DOF = 7
+  let AXL_QUEUE_LENGTH = 22 // actual is 32, use this to start... 
+  let nextSegmentOut = 0 
+  let addMoveToQueue = async (target, vel) => {
+    try {
+      await actuators[a].addMoveToQueue()
+    } catch (err) {
+      throw err 
+    }
+  }
+
   // -------------------------------------------- Setters 
 
   let setPosition = async (pos) => {

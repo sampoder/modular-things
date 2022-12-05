@@ -25,6 +25,7 @@ import { global_state } from "./global_state.js";
 
 import rgbb from "../virtualThings/rgbb.js";
 import stepper from "../virtualThings/stepper.js";
+import stepperSequential from "../virtualThings/stepperSequential.js";
 import capacitive from "../virtualThings/capacitive.js";
 import timeOfFlight from "../virtualThings/timeOfFlight.js";
 import mosfet from "../virtualThings/mosfet.js";
@@ -54,6 +55,7 @@ rescanEndpoint.onData = () => {
 let constructors = {
   rgbb,
   stepper,
+  stepperSequential,
   capacitive,
   timeOfFlight,
   mosfet,

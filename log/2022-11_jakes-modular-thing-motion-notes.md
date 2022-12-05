@@ -118,11 +118,19 @@ OK it's time-oclock to actually implement this... being a little more flash-savv
 
 Next... I'm ending up ~ round-about implementing everything here, from axl, but I am maybe about to run out of flash, so might have to stack-acks in a single message-return endpoint... 
 
-- instrument return pipes 
-- needs to select ourAxisID
-- ... actually run the thing ? 
-- js piping / setup ? 
-- recall that js has ackless transmit of segments, since acks are piped back via setup-route, 
+And plumbing... I need somewhere to collect acks (though I think I will actually just use the endpoint structure), so somewhere to collect move-complete segments, probably in the synchronizer (?) or in the motor, idk, a collector. 
+
+The sync, the sync... I do need this structure *now* yeah. 
+
+- use natural endpoint acks for downstream transmits, 
+- synchronizer w/ list of motors 
+  - hooks in to motor.onMoveComplete(segNum)... 
+- one stepper-windowed-queue 
+- setup two motors, or three, 
+- select ourActuatorIndice in settings 
+- fork stepper virtualmachine, pipe acks back up, 
+- fork synchronizer virtualMachine, try ingesting a queue, sending, etc ? 
+  - recall that js has ackless transmit of segments, since acks are piped back via setup-route, 
 
 ---
 

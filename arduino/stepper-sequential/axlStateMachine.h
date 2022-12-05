@@ -81,4 +81,7 @@ uint16_t axl_getSegmentCompleteMsg(uint8_t* msg);
 // halt-and-latch, not implemented, but needed in fullness of lossy-link time 
 void axl_halt(uint8_t haltCode);
 
+// ---- setters ?
+void axl_setActuatorIndice(uint8_t indice);
+
 #endif 

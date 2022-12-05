@@ -7,7 +7,7 @@
 #include <core/ts.h>
 
 // ---------------------------------------------- OSAP central-nugget 
-OSAP osap("stepper");
+OSAP osap("stepperSequential");
 
 // ---------------------------------------------- 0th Vertex: OSAP USB Serial
 VPort_ArduinoSerial vp_arduinoSerial(&osap, "usbSerial", &Serial);
@@ -58,7 +58,9 @@ EP_ONDATA_RESPONSES onSettingsData(uint8_t* data, uint16_t len){
   // it's just <cscale> for the time being, 
   uint16_t rptr = 0;
   float cscale = ts_readFloat32(data, &rptr);
+  uint8_t actuatorIndice = data[rptr ++];
   stepper_setCurrentScale(cscale);
+  axl_setActuatorIndice(actuatorIndice);
   return EP_ONDATA_ACCEPT;
 }
 
@@ -93,11 +95,7 @@ EP_ONDATA_RESPONSES onQueueData(uint8_t* data, uint16_t len){
 
 Endpoint queueIngestEndpoint(&osap, "queueIngest", onQueueData);
 
-// ---------------------------------------------- 6th Vertex: Segment rx-ack
-
-Endpoint segmentAckOutEP(&osap, "segmentAcks");
-
-// ---------------------------------------------- 7th Vertex: Segment complete-ack 
+// ---------------------------------------------- 6th Vertex: Segment complete-ack 
 
 Endpoint segmentCompleteOutEP(&osap, "segmentComplete");
 
@@ -133,11 +131,6 @@ uint16_t axlDataLen = 0;
 void loop() {
   // do graph stuff
   osap.loop();
-  // check for messages from motion system ?
-  axlDataLen = axl_getSegmentAckMsg(axlData);
-  if(axlDataLen){
-    segmentAckOutEP.write(axlData, axlDataLen);
-  }
   // check for queueSegmentComplete 
   axlDataLen = axl_getSegmentCompleteMsg(axlData);
   if(axlDataLen){

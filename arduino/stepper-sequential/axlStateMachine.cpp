@@ -52,6 +52,11 @@ uint16_t haltMsgLen = 0;
 // ---------------------------------------------- axl dof-to-motor linkage, 
 uint8_t ourActuatorIndice = 0;
 
+void axl_setActuatorIndice(uint8_t indice){
+  if(indice >= AXL_MAX_DOF) indice = AXL_MAX_DOF - 1;
+  ourActuatorIndice = indice;
+}
+
 // this is the "limit" pin, currently used as a debug, 
 #define PIN_TICK 22
 
@@ -190,10 +195,10 @@ void axl_integrate(void){
   pos += segDelta;
   // and we use that to operate our stepper: 
   stepModulo += segDelta;
-  if(stepModulo >= 1.0F){
+  if(stepModulo > 1.0F){
     stepper_step(microsteps, true);
     stepModulo -= 1.0F;
-  } else if (stepModulo <= -1.0F){
+  } else if (stepModulo < -1.0F){
     stepper_step(microsteps, false);
     stepModulo += 1.0F;
   }
@@ -214,8 +219,10 @@ void axl_integrate(void){
     }
     // otherwise carry on, 
     segmentCompleteMsgLen = 0;
+    uint16_t scmWPtr = 0;
     // segment #, and our actuator ID... 
-    ts_writeUint32(queueTail->segmentNumber, segmentCompleteMsg, &segmentCompleteMsgLen);
+    ts_writeUint32(queueTail->segmentNumber, segmentCompleteMsg, &scmWPtr);
+    segmentCompleteMsgLen = scmWPtr;
     // that's it, the ack will be picked up... 
     // before we increment, stash this extra distance into the next segment... 
     segDistance = segDistance - queueTail->distance;
@@ -337,14 +344,6 @@ void axl_addSegmentToQueue(axlPlannedSegment_t segment){
   queueHead->accel = segment.accel;
   queueHead->vmax = segment.vmax;
   queueHead->vf = segment.vf;
-  // and formulate our ack message... 
-  // was previous ack picked up in time ? bad if not 
-  if(segmentAckMsgLen != 0){
-    axl_halt(AXL_HALT_MOVE_COMPLETE_NOT_PICKED);
-  }
-  // otherwise carry on & write it... 
-  // segment #, and our actuator ID... 
-  ts_writeUint32(queueHead->segmentNumber, segmentAckMsg, &segmentAckMsgLen);
   noInterrupts();
   // and set these to allow read-out of the move
   queueHead->isReady = true;
