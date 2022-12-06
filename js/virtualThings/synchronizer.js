@@ -97,6 +97,13 @@ export default function createSynchronizer(actuators) {
   let nextSegmentOut = 0 
   let addMoveToQueue = async (target, vel) => {
     try {
+      here // we are 
+      /*
+      a little braindead, but I think this is about to test:
+      we should do... target, from last-targetted, do deltas, distance, 
+      unit vector, then send it (?) and wait for rx, then wait for seg-complete ?
+      then we're just into queue management ? 
+      */
       await actuators[a].addMoveToQueue()
     } catch (err) {
       throw err 
@@ -275,6 +282,8 @@ export default function createSynchronizer(actuators) {
   return {
     // listicle, 
     actuators,
+    // sync'd motion 
+    addMoveToQueue,
     // operate w/ 
     target,
     absolute,

@@ -58,7 +58,7 @@ export default function stepperSequential(osap, vt, name) {
         // which is bound to happen for first time setups (!) 
       }
       // pipe 'em back up to us:
-      await osap.mvc.setEndpointRoute(vt.children[6].route, segmentAckRouteUp)
+      await osap.mvc.setEndpointRoute(vt.children[6].route, segmentCompleteRouteUp)
     } catch (err) {
       throw err
     }
@@ -358,6 +358,7 @@ export default function stepperSequential(osap, vt, name) {
     // these are hidden 
     setup,
     vt,
+    api: [],
     // api: [
     //   {
     //     name: "absolute",
