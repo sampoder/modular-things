@@ -42,7 +42,7 @@ typedef struct axlState_t {
 typedef struct axlPlannedSegment_t {
   // we're given these data over the network:
   uint32_t segmentNumber = 0;               // continuity counter 
-  boolean isLastSegment = false;            // should we expect end of queue here ? 
+  // boolean isLastSegment = false;            // should we expect end of queue here ? 
   float unit[AXL_MAX_DOF];
   float vi = 0.0F;                          // start velocity 
   float accel = 0.0F;                       // accel rate 

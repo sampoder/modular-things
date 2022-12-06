@@ -3,7 +3,7 @@
 #include "stepperDriver.h"
 #include <osap.h>
 #include <vt_endpoint.h>
-#include <vp_arduinoSerial.h>
+#include <vp_arduinoSerial.h> 
 #include <core/ts.h>
 
 // ---------------------------------------------- OSAP central-nugget 
@@ -60,6 +60,7 @@ EP_ONDATA_RESPONSES onSettingsData(uint8_t* data, uint16_t len){
   float cscale = ts_readFloat32(data, &rptr);
   uint8_t actuatorIndice = data[rptr ++];
   stepper_setCurrentScale(cscale);
+  OSAP::error("indice to..." + String(actuatorIndice));
   axl_setActuatorIndice(actuatorIndice);
   return EP_ONDATA_ACCEPT;
 }
@@ -75,7 +76,7 @@ EP_ONDATA_RESPONSES onQueueData(uint8_t* data, uint16_t len){
   // location of segment-in-sequence, to count continuity, 
   segment.segmentNumber = ts_readUint32(data, &rptr);
   // is it the end of this stream ?
-  segment.isLastSegment = ts_readBoolean(data, &rptr);
+  // segment.isLastSegment = ts_readBoolean(data, &rptr);
   // OSAP::debug("segnum, isLast " + String(segment.segmentNumber) + ", " + String(segment.isLastSegment));
   // unit vector describing segment's direction, in all-dof space, 
   for(uint8_t a = 0; a < AXL_MAX_DOF; a ++){

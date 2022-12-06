@@ -227,13 +227,13 @@ void axl_integrate(void){
     // before we increment, stash this extra distance into the next segment... 
     segDistance = segDistance - queueTail->distance;
     // was it the last ?
-    boolean wasLastMove = queueTail->isLastSegment;
+    // boolean wasLastMove = queueTail->isLastSegment;
     // now increment the pointer, 
     queueTail = queueTail->next;
     // is that ready ? then grab another, if not, set moves-complete, 
     if(!queueTail->isReady){
       // if this is true and our velocities != 0, we are probably starved:
-      if(!wasLastMove) axl_halt(AXL_HALT_BUFFER_STARVED);
+      // if(!wasLastMove) axl_halt(AXL_HALT_BUFFER_STARVED);
       // we're empty now, so 
       queueState = AXL_QUEUESTATE_EMPTY;
       // and set velocity to 0, 
@@ -332,7 +332,7 @@ void axl_addSegmentToQueue(axlPlannedSegment_t segment){
     nextSegmentNumber ++; 
   }
   // is it the last... 
-  queueHead->isLastSegment = segment.isLastSegment;
+  // queueHead->isLastSegment = segment.isLastSegment;
   // collect the unit vector, just all, every time, for now,
   // future implementations (which are packet-friendlier) would use dof_in_use or something
   for(uint8_t a = 0; a < AXL_MAX_DOF; a ++){

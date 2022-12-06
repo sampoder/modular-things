@@ -40,6 +40,11 @@ machine.stop()
 - this is complex in surprising ways... 
 */
 
+import TIME from "../osapjs/core/time.js"
+import { TS } from "../osapjs/core/ts.js"
+
+// these are middling vector-maths implementations, my apologies
+
 // addition... 
 let vectorAddition = (A, B) => {
   return A.map((a, i) => { return A[i] + B[i] })
@@ -47,11 +52,11 @@ let vectorAddition = (A, B) => {
 
 // distances from a-to-b, 
 let vectorDeltas = (A, B) => {
-  return A.map((a, i) => { return A[i] - B[i] })
+  return A.map((a, i) => { return B[i] - A[i] })
 }
 
 // between A and B 
-let distance = (A, B) => {
+let vectorDistance = (A, B) => {
   let numDof = A.length
   let sum = 0
   for (let a = 0; a < numDof; a++) {
@@ -63,10 +68,21 @@ let distance = (A, B) => {
 // from A to B 
 let unitVector = (A, B) => {
   let numDof = A.length
-  let dist = distance(A, B)
+  let dist = vectorDistance(A, B)
   let unit = new Array(numDof)
   for (let a = 0; a < numDof; a++) {
     unit[a] = (B[a] - A[a]) / dist
+  }
+  return unit
+}
+
+// of A 
+let unitOf = (A) => {
+  let numDof = A.length 
+  let dist = vectorDistance(A, (new Array(numDof)).fill(0))
+  let unit = new Array(numDof)
+  for (let a = 0; a < numDof; a++) {
+    unit[a] = (A[a]) / dist
   }
   return unit
 }
@@ -85,6 +101,13 @@ export default function createSynchronizer(actuators) {
   let segComplete = (a, num) => {
     // will pop from list here, check against all-else, etc... 
     console.warn(`synchronizer rx complete from ${a}, num ${num}`)
+    // find and pop from queue, 
+    for(let s in queue){
+      for(let c in queue[s].actuators){
+        console.log(c, a, c == a, queue[s].segmentNumber == num)
+      }
+      // mark 'em rx'd, then re-check queue states 
+    }
   }
   for(let a = 0; a < actuators.length; a ++){
     actuators[a].attachSegmentCompleteFn((data) => {
@@ -92,19 +115,146 @@ export default function createSynchronizer(actuators) {
       segComplete(a, segNum)
     })
   }
+  let queue = [] 
+  let jsQueueStartDelay = 500 
+  let QUEUE_STATE_EMPTY = 1
+  let QUEUE_STATE_AWAITING_START = 2
+  let QUEUE_STATE_RUNNING = 3
+  let QUEUE_STATE_HALTED = 4
   let AXL_MAX_DOF = 7
-  let AXL_QUEUE_LENGTH = 22 // actual is 32, use this to start... 
+  let AXL_REMOTE_QUEUE_LENGTH = 30 // actual in embedded is 32, use this to start... 
+  let queueState = QUEUE_STATE_EMPTY
   let nextSegmentOut = 0 
-  let addMoveToQueue = async (target, vel) => {
+  let lastTargetPosition = null 
+  let addMoveToQueue = async (target, vel, accel) => {
     try {
-      here // we are 
-      /*
-      a little braindead, but I think this is about to test:
-      we should do... target, from last-targetted, do deltas, distance, 
-      unit vector, then send it (?) and wait for rx, then wait for seg-complete ?
-      then we're just into queue management ? 
-      */
-      await actuators[a].addMoveToQueue()
+      // modal vel-and-accels,
+      vel ? lastVel = vel : vel = lastVel;
+      accel ? lastAccel = accel : accel = lastAccel;
+      // arrays only 
+      if(!Array.isArray(target)) throw new Error(`arrays only into <target> for addMoveToQueue pls`)
+      // we use a stateful last-posn to reckon deltas, 
+      // this is stored in axl's full width... 
+      if(!lastTargetPosition){
+        lastTargetPosition = (new Array(AXL_MAX_DOF)).fill(0)
+        console.warn(`on queue startup, init last-posn array to`, lastTargetPosition)
+      }
+      // fill the target to match DOF count 
+      if(target.length < AXL_MAX_DOF) target = target.concat((new Array(AXL_MAX_DOF - target.length)).fill(0))
+      // console.warn(`filled target, is now `, target)
+      // get the delta move:
+      let deltas = vectorDeltas(lastTargetPosition, target)
+      // console.warn(`deltas`, deltas)
+      // and the distance,
+      let dist = vectorDistance(lastTargetPosition, target)
+      // console.warn(`dist`, dist)
+      // and the unit of that,
+      let unit = unitOf(deltas)
+      console.warn(`unit`, unit[0].toFixed(3))
+      // OK, we should check 'em against max accels / max velocities, 
+      // we're also going to need to know about each motor's abs-max velocities:
+      let absMaxVelocities = actuators.map(actu => actu.getAbsMaxVelocity())
+      let absMaxAccels = actuators.map(actu => actu.getAbsMaxAccel())
+      // these are our candidate vels & accels for the move, 
+      let velocities = unit.map((u, i) => { return Math.abs(unit[i] * vel) })
+      let accels = unit.map((u, i) => { return Math.abs(unit[i] * accel) })
+      // but some vels or accels might be too large, check thru and assign the biggest-squish to everything, 
+      let scaleFactor = 1.0
+      for (let a in actuators) {
+        if (velocities[a] > absMaxVelocities[a]) {
+          let candidateScale = absMaxVelocities[a] / velocities[a]
+          if (candidateScale < scaleFactor) scaleFactor = candidateScale;
+        }
+        if (accels[a] > absMaxAccels[a]) {
+          let candidateScale = absMaxAccels[a] / accels[a]
+          if (candidateScale < scaleFactor) scaleFactor = candidateScale;
+        }
+      }
+      // we want to apply that factor to the move's vel & accel, 
+      // though - this a bug - we could have different max-vel scaling and max-accel scaling, non ?
+      vel = vel * scaleFactor;
+      accel = accel * scaleFactor;
+      // OK so we have a legal move now: a unit vector, vmax (vel), accel, 
+      // but no vi, vf. 
+      // time being, let's do this:
+      let vi = vel * 0.25 
+      let vf = vel * 0.25 
+      // yep, lol, now let's queue em, right ? 
+      // I think that means... 
+      // - stuff into an object
+      // - stuff into the queue (w/ time-released, etc info)
+      // - do checkQueueStates, 
+      let segment = {
+        unit, vi, accel, vmax: vel, vf, dist,
+        segmentNumber: nextSegmentOut,
+        // isLastSegment: false, 
+        transmitTime: 0,
+      }
+      console.warn(`adding segment: \nvi: ${vi.toFixed(2)}\t vmax: ${vel.toFixed(2)}\t vf: ${vf.toFixed(2)}\naccel: ${accel.toFixed(2)}\t dist: ${dist.toFixed(2)}\nnum: ${nextSegmentOut}`)
+      nextSegmentOut ++ 
+      lastTargetPosition = target 
+      // add to le queueue
+      queue.push(segment)
+      // here is where we could do runQueueOptimization()
+      // checkQueueState looks at tx states, etc, and tx's, etc 
+      await checkQueueState()
+    } catch (err) {
+      throw err 
+    }
+  }
+
+  let checkQueueState = async () => {
+    try {
+      switch (queueState) {
+        case QUEUE_STATE_EMPTY:
+          if (queue.length > 0) {
+            queueState = QUEUE_STATE_AWAITING_START
+            setTimeout(() => {
+              console.warn(`QUEUE START FROM AWAITING...`)
+              queueState = QUEUE_STATE_RUNNING
+              checkQueueState()
+            }, jsQueueStartDelay)
+          }
+          break;
+        case QUEUE_STATE_AWAITING_START:
+          // noop, wait for timer... 
+          break;
+        case QUEUE_STATE_RUNNING:
+          // can we publish, do we have unplanned, etc?
+          // console.warn(`QUEUE RUNNING...`)
+          // so we'll try to transmit up to 32 ? and just stuff 'em unapologetically into the buffer, leggo: 
+          for (let m = 0; m < AXL_REMOTE_QUEUE_LENGTH - 1; m++) {
+            if (!queue[m]) {
+              // console.warn(`breaking because not-even-32-items here...`)
+              break;
+            }
+            if (queue[m].transmitTime == 0) {
+              // console.log(`tx'd item at ${m}, segment ${queue[m].segmentNumber}`)
+              await transmitSegment(queue[m])
+            }
+          }
+          break;
+        case QUEUE_STATE_HALTED:
+          console.warn(`halted, exiting...`)
+          break;
+        default:
+          console.error(`unknown state...`)
+          break;
+      } // end switch 
+    } catch (err) {
+      throw err
+    }
+  }
+
+  let transmitSegment = async (segment) => {
+    try {
+      segment.transmitTime = TIME.getTimeStamp()
+      // we have to track acks-from-actuators, 
+      segment.actuators = []
+      await Promise.all(actuators.map((actu, i) => { 
+        segment.actuators.push(i)
+        return actu.transmitPlannedSegment(segment)
+      }))
     } catch (err) {
       throw err 
     }

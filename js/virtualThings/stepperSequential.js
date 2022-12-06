@@ -38,7 +38,7 @@ export default function stepperSequential(osap, vt, name) {
   let attachSegmentCompleteFn = (fn) => {
     onSegmentCompleteIn = fn 
   }
-  let segmentCompleteIn = osap.endpoint(`segmentCompletes+${name}`)
+  let segmentCompleteIn = osap.endpoint(`segmentCompletes_${name}`)
   segmentCompleteIn.onData = (data) => {
     onSegmentCompleteIn(data)
   }
@@ -64,30 +64,37 @@ export default function stepperSequential(osap, vt, name) {
     }
   }
 
+  // -------------------------------------------- Setters
+  // how many steps-per-unit, 
+  // this could be included in a machineSpaceToActuatorSpace transform as well, 
+  let spu = 20
+  // each has a max-max velocity and acceleration, which are user settings, 
+  // but velocity is also abs-abs-max'd at our tick rate... 
+  let absMaxVelocity = 4000 / spu
+  let absMaxAccel = 10000
+  let lastVel = absMaxVelocity
+  let lastAccel = 100             // units / sec 
+
   // -------------------------------------------- queue'd motion:
+  // this is ~ exclusively operated by the synchronizer class, 
   let AXL_MAX_DOF = 7 
-  let transmitPlannedSegment = async (unit, vi, accel, vmax, vf, dist, isLast) => {
+  let transmitPlannedSegment = async (segment) => {
     try {
-      if(unit.length < AXL_MAX_DOF){
-        for(let a = unit.length; a < AXL_MAX_DOF; a ++){
-          unit[a] = 0.0;
-        }
-      }
-      // unit, 5x floats, 1x uint32 segnum, 1x boolean isLast
-      let datagram = new Uint8Array(AXL_MAX_DOF * 4 + 5 * 4 + 4 + 1)
+      // unit (dof x floats), 5x floats, 1x uint32 segnum
+      let datagram = new Uint8Array(AXL_MAX_DOF * 4 + 5 * 4 + 4)
       let wptr = 0
       // write segnum, last-ness, 
-      wptr += TS.write("uint32", nextSegmentOut, datagram, wptr)
-      wptr += TS.write("boolean", isLast, datagram, wptr)
+      wptr += TS.write("uint32", segment.segmentNumber, datagram, wptr)
+      // wptr += TS.write("boolean", segment.isLastSegment, datagram, wptr)
       // write unit vector, 
       for(let a = 0; a < AXL_MAX_DOF; a ++){
-        wptr += TS.write("float32", unit[a], datagram, wptr)
+        wptr += TS.write("float32", segment.unit[a], datagram, wptr)
       }
-      wptr += TS.write("float32", vi, datagram, wptr)
-      wptr += TS.write("float32", accel, datagram, wptr)
-      wptr += TS.write("float32", vmax, datagram, wptr)
-      wptr += TS.write("float32", vf, datagram, wptr)
-      wptr += TS.write("float32", dist, datagram, wptr)
+      wptr += TS.write("float32", segment.vi * spu, datagram, wptr)
+      wptr += TS.write("float32", segment.accel * spu, datagram, wptr)
+      wptr += TS.write("float32", segment.vmax * spu, datagram, wptr)
+      wptr += TS.write("float32", segment.vf * spu, datagram, wptr)
+      wptr += TS.write("float32", segment.dist * spu, datagram, wptr)
       await queueOutputEndpoint.write(datagram, "ackless")
     } catch (err) {
       throw err 
@@ -119,17 +126,6 @@ export default function stepperSequential(osap, vt, name) {
   //   // that's it, but don't copy-in, 
   //   return EP_ONDATA_REJECT;
   // }
-
-  // -------------------------------------------- Setters
-  // how many steps-per-unit, 
-  // this could be included in a machineSpaceToActuatorSpace transform as well, 
-  let spu = 20
-  // each has a max-max velocity and acceleration, which are user settings, 
-  // but velocity is also abs-abs-max'd at our tick rate... 
-  let absMaxVelocity = 4000 / spu
-  let absMaxAccel = 10000
-  let lastVel = absMaxVelocity
-  let lastAccel = 100             // units / sec 
 
   let setPosition = async (pos) => {
     try {
@@ -166,11 +162,12 @@ export default function stepperSequential(osap, vt, name) {
     absMaxVelocity = maxVel
   }
 
-  let setCScale = async (cscale) => {
+  let setCScale = async (cscale, indice) => {
     try {
-      let datagram = new Uint8Array(4)
+      let datagram = new Uint8Array(5)
       let wptr = 0
       wptr += TS.write("float32", cscale, datagram, wptr)  // it's 0-1, firmware checks
+      datagram[4] = indice 
       // and we can shippity ship it, 
       await settingsEndpoint.write(datagram, "acked")
     } catch (err) {
@@ -348,13 +345,13 @@ export default function stepperSequential(osap, vt, name) {
     // setAccel,
     // setAbsMaxAccel,
     // setAbsMaxVelocity,
-    // setCScale,
-    // setSPU,
+    setCScale,
+    setSPU,
     // // inspect... 
     // getPosition,
     // getVelocity,
-    // getAbsMaxVelocity,
-    // getAbsMaxAccel,
+    getAbsMaxVelocity,
+    getAbsMaxAccel,
     // these are hidden 
     setup,
     vt,
