@@ -71,8 +71,12 @@ let unitVector = (A, B) => {
   return unit
 }
 
-export default function createSynchronizer(actuators) {
+export default async function createSynchronizer(actuators) {
   if (!Array.isArray(actuators)) throw new Error(`pls, an array of actuators`)
+  // we want to do some plumbing, I think... 
+  // yeah: it'll be pretty simple; for each actuator, we should just plumb its seg-complete 
+  // pipe back up to some endpoint here... 
+  console.log(actuators[0].vt)
   // some state... our most-recently used accel & velocity,
   // there's going to be a little bit of trouble w/r/t motor absolute-max-velocities
   // and what the machine. requests of them,

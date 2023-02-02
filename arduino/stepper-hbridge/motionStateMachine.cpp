@@ -77,25 +77,50 @@ float delT = 0.001F;
 // and note (!) this *is not* "microstepping" as in 1/n, it's n/16, per our LUTS 
 uint8_t microsteps = 4; 
 // states (units are steps, 1=1 ?) 
-volatile uint8_t mode = MOTION_MODE_POS;            // operative mode 
-volatile fpint64_t pos = 0;                         // current position (64-wide!) 
-volatile fpint32_t vel = 0;                         // current velocity 
-volatile fpint32_t accel = 0;                       // current acceleration 
+volatile uint8_t mode = MOTION_MODE_NONE;            // operative mode 
+volatile fpint64_t pos[MOTION_MAX_DOF] = 0;         // current position (64-wide!) 
+volatile fpint64_t dir[MOTION_MAX_DOF] = 0;
+volatile fpint32_t vel = 0;                         // current velocity *along dir vector*
+volatile fpint32_t accel = 0;                       // current acceleration *along dir vector* 
 // and settings... 
 volatile fpint32_t maxAccel = 0;                    // absolute maximum acceleration (steps / sec) (not recalculated, but given w/ user instructions)
 volatile fpint32_t maxVel = 0;                      // absolute maximum velocity (units / sec) (also recalculated on init)
-volatile fpint32_t absMaxRate = 0;              // we'll recalculate this, it's related to our stepping rate 
-// and targets, 
-volatile fpint64_t posTarget = 0;
-volatile fpint32_t velTarget = 0;
+volatile fpint32_t absMaxRate = 0;                  // we'll recalculate this, it's related to our stepping rate 
 // ---------------------------------------------- integrator-internal stuff 
 // init-once values we'll use in the integrator 
 volatile fpint32_t delta = 0;
 volatile fpint32_t stepModulo = 0;
-volatile fpint64_t distanceToTarget = 0;
-
+volatile fpint64_t distanceAlongSegment = 0;
+volatile fpint64_t distanceToEnd = 0;
+// values we'll be recalculating often... 
 volatile fpint64_t twoDA = 0;
 volatile fpint64_t vSquared = 0;
+// ---------------------------------------------- we have a queue 
+// similar to our interface type, but we use fixed point maths internally, so:
+typedef struct motionSegment_t {
+  // sequence helpers 
+  uint32_t segmentNumber = 0;
+  boolean isLastSegment = false;
+  // valuuuues
+  fpint32_t unit[MOTION_MAX_DOF];
+  fpint32_t vi = 0;
+  fpint32_t accel = 0;
+  fpint32_t vmax = 0;
+  fpint32_t vf = 0;
+  fpint64_t distance = 0;
+  // ready/set, 
+  boolean isReady = false;
+  boolean isRunning = false;
+  // linking 
+  motionSegment_t* next;
+  motionSegment_t* previous;
+  uint32_t indice = 0;  // track own location, 
+} motionSegment_t;
+// we have a queue of these that we'll link up in the init code, 
+motionSegment_t queue[MOTION_QUEUE_LEN];
+// and our own head, tail for the queue 
+motionSegment_t* head;  // write moves into here, 
+motionSegment_t* tail;  // operate from here, 
 
 // ~ wavey, babey 
 #define FP_STOPCALC_REDUCE 4
@@ -103,6 +128,23 @@ volatile fpint64_t vSquared = 0;
 // s/o to http://academy.cba.mit.edu/classes/output_devices/servo/hello.servo-registers.D11C.ino 
 // s/o also to https://gist.github.com/nonsintetic/ad13e70f164801325f5f552f84306d6f 
 void motion_init(int32_t microsecondsPerIntegration){
+  // -------------------------------------------- queue needs some setup, 
+  for(uint8_t i = 0; i < MOTION_QUEUE_LEN; i ++){
+    // maybe unnecessary, but feels better if units are defaulted to zero, 
+    for(uint8_t a = 0; a < MOTION_MAX_DOF; a ++){
+      queue[i].unit[a] = 0;
+    }
+    // each tags own indice, 
+    queue[i].indice = i;
+    // and we link this -> next, prev <- this 
+    if(i != MOTION_QUEUE_LEN - 1) queue[i].next = &(queue[i+1]);
+    if(i != 0) queue[i].previous = &(queue[i-1]);
+  }
+  // and the wraparound cases, 
+  queue[0].previous = &(queue[MOTION_QUEUE_LEN - 1]);
+  queue[MOTION_QUEUE_LEN - 1].next = &(queue[0]);
+  head = &(queue[0]);  // where to write-in, 
+  tail = &(queue[0]);  // which is ticking along... 
   // -------------------------------------------- Maximums, given delta-tee,
   // before we get into hardware, let's consider our absolute-maximums;
   // here's our delta-tee, in real seconds:
@@ -156,44 +198,54 @@ void TC5_Handler(void){
 void motion_integrate(void){
   // set our accel based on modal requests, 
   switch(mode){
-    case MOTION_MODE_POS:
-      // how far to go ? 
-      distanceToTarget = posTarget - pos;
-      // since we dead-reckon targets at the end, we should have this case:
-      if(distanceToTarget == 0){
-        vel = 0;
-        accel = 0;
-        break;
-      }
+    case MOTION_MODE_NONE:
+      return;
+    case MOTION_MODE_QUEUE:
+      // we have an entering-the-move case, where isReady, !isRunning, 
+      // we *should not* ever be in the case where we have neither... 
+      here // not ready... we need to check initial condits 
+      // i.e. the remainder... what of it ? do we reset distanceAlong -> zero, or non ? 
+      // OK, are we within a valid move? 
+      if(!(tail->isReady) || !(tail->isRunning)) { mode = MOTION_MODE_NONE; return; }
+      // check about our distance-to-end, 
+      distanceToEnd = tail->distance - distanceAlongSegment;
+      // we shouldn't have any of these cases, but let's guard ?
+      if(distanceToEnd <= 0){ vel = 0; accel = 0; mode = MOTION_MODE_NONE; return; }
+      // calculate our stopping requirement: 
       // I think it's like this:
       // (x << 1) == (x * 2), that's gorgus, 
       // and we're going to do this... with a little less prescision, as accel can be punishing:
-
       // that's the (x >> 16) in each of these terms... 
-      twoDA = ((abs(distanceToTarget) << 1) >> FP_STOPCALC_REDUCE) * ((int64_t)(maxAccel) >> FP_STOPCALC_REDUCE);
+      here 
+      // shit, we're going to need some fancier shit for this considering we have to hit VF... 
+      twoDA = ((abs(distanceToEnd) << 1) >> FP_STOPCALC_REDUCE) * ((int64_t)(tail->accel) >> FP_STOPCALC_REDUCE);
       //abs(((((int64_t)(2 << fp_scale) * distanceToTarget) >> fp_scale) * (int64_t)(maxAccel)));
       vSquared = ((int64_t)(vel >> FP_STOPCALC_REDUCE) * (int64_t)(vel >> FP_STOPCALC_REDUCE));
       // we can use that to compare when-2-stop, 
       if(twoDA <= vSquared){    // if we're going to overshoot, deccel:
         if(vel <= 0){                               // if -ve vel,
-          accel = maxAccel;                           // do +ve accel, 
+          accel = tail->accel;                           // do +ve accel, 
         } else {                                    // if +ve vel, 
-          accel = -maxAccel;                          // do -ve accel, 
+          accel = -tail->accel;                          // do -ve accel, 
         }
       } else {                                      // if we're not going to overshoot, 
         if(distanceToTarget > 0){                   // if +ve distance, 
-          accel = maxAccel;                           // do +ve accel,
+          accel = tail->accel;                           // do +ve accel,
         } else {                                  // if -ve distnace,
-          accel = -maxAccel;                          // do -ve accel, 
+          accel = -tail->accel;                          // do -ve accel, 
         }
       }
       break;
     case MOTION_MODE_VEL:
-      if(vel < velTarget){
-        accel = maxAccel; 
-      } else if (vel > velTarget){
-        accel = -maxAccel;
-      }
+      /*
+        I'm going to TODO this for now;
+        it should do something like per-axis accel to a target unit-vector and rate along it, ... ?
+      */
+      // if(vel < velTarget){
+      //   accel = maxAccel; 
+      // } else if (vel > velTarget){
+      //   accel = -maxAccel;
+      // }
       break;
   } // end mode-switch / accel settings, 
   // using our chosen accel, integrate velocity from previous: 
@@ -201,15 +253,57 @@ void motion_integrate(void){
   // there's no multiply here, just += ... 
   vel += accel;
   // cap our vel based on maximum rates: 
-  if(vel >= maxVel){
+  // we only ever travers along the line in +ve vels, dir is in the unit vector, 
+  if(vel >= tail->vmax){
     accel = 0;
-    vel = maxVel;
-  } else if(vel <= -maxVel){
-    accel = 0;
-    vel = - maxVel;
+    vel = tail->vmax;
+  } 
+  // but we also don't want to ever go into -ve velocity, which is possible if we fk our maths 
+  // and decelerate 2 much 
+  if(vel < 0){ 
+    vel = 0; 
   }
-  // what's a position delta ? 
+  // velocity & accel are in steps-per-integration units, so delta == vel, 
   delta = vel; 
+  // stopping conditions are also... modal, 
+  switch(mode){
+    case MOTION_MODE_NONE:
+      return; 
+    case MOTION_MODE_QUEUE:
+      if(delta >= distanceToEnd){
+        // we're either switching segments, or finishing up 
+        // in either case, end-of-op will hit the corner:
+        delta = distanceToEnd;
+        // in either case we're done w/ this segment, and increment to the next, 
+        tail->isReady = false;
+        tail->isRunning = false; 
+        tail = tail->next;
+        // do we have a new segment to collect ? 
+        if(tail->next->isReady){
+          // stash the remainder into the distanceAlong, 
+          distanceAlongSegment = delta - distanceToEnd;
+          // set initial vel, (is tail->vi, since we already incremented tail above)
+          vel = tail->vi;
+        } else {
+          // this is the end of the train, reset for new initial condits 
+          distanceAlongSegment = 0;
+          vel = 0;
+          mode = MOTION_MODE_NONE;
+        }
+        // and we finish with this delta 
+        HERE  
+        // this might be it... let's rethink the delta: on a change-over, it might mean we 
+        // do the bump-around-the-corner, ... then posn deltas-per-axis are a little messier, or maybe not, 
+        delta = distanceToEnd;
+      }
+      break;
+    case MOTION_MODE_VEL:
+      // 
+      break;
+  }
+  // if the next step is going to complete the segment, we have to do a little state flippen, 
+  HERE 
+  // need to figure what's up with deltas, stepping, and wrapping... 
   // if the next step is going to hit the targ, make exactly that delta... 
   if(mode == MOTION_MODE_POS){
     if(delta > distanceToTarget && distanceToTarget > 0){
@@ -219,6 +313,7 @@ void motion_integrate(void){
     }
   }
   // I think we can smash these together (?) 
+  distanceAlongSegment += delta; 
   pos += delta;
   // and check the step modulo as well:
   stepModulo += delta;
@@ -230,39 +325,6 @@ void motion_integrate(void){
     stepModulo += fp_int32ToFixed32(1);
   }
 } // end integrator 
-
-void motion_setPositionTarget(float _targ, float _maxVel, float _maxAccel){
-  // first, elevate from units-per-sec to units-per-integration-step,
-  // and convert, 
-  fpint32_t _mvCand = fp_floatToFixed32(_maxVel * delT);
-  // I think that we might need to scale accel by delT^2, since 2nd derivative (?) or sth ?
-  fpint32_t _maCand = fp_floatToFixed32(_maxAccel * delT * delT);
-  // and check againt our abs-max, 
-  if(_mvCand > absMaxRate) _mvCand = absMaxRate;
-  if(_maCand > absMaxRate) _maCand = absMaxRate;
-  // and stash as 
-  noInterrupts();
-  maxVel = _mvCand;
-  maxAccel = _maCand;
-  posTarget = fp_floatToFixed64(_targ);
-  mode = MOTION_MODE_POS;
-  interrupts();
-}
-
-void motion_setVelocityTarget(float _targ, float _maxAccel){
-  fpint32_t _maCand = fp_floatToFixed32(_maxAccel * delT * delT);
-  if(_maCand > absMaxRate) _maCand = absMaxRate;
-  noInterrupts();
-  maxAccel = _maCand;
-  velTarget = fp_floatToFixed32(delT * _targ);
-  mode = MOTION_MODE_VEL;
-  interrupts();
-}
-
-void motion_setPosition(float _pos){
-  // not too introspective here,
-  pos = fp_floatToFixed64(_pos);
-}
 
 void motion_getCurrentStates(motionState_t* statePtr){
   noInterrupts();
@@ -279,4 +341,39 @@ void motion_getCurrentStates(motionState_t* statePtr){
 
 void motion_printDebug(void){
   // we should check if these worked, 
+}
+
+// ---------------------------------------------- un-re-facor'd
+
+void motion_setPositionTarget(float _targ, float _maxVel, float _maxAccel){
+  // // first, elevate from units-per-sec to units-per-integration-step,
+  // // and convert, 
+  // fpint32_t _mvCand = fp_floatToFixed32(_maxVel * delT);
+  // // I think that we might need to scale accel by delT^2, since 2nd derivative (?) or sth ?
+  // fpint32_t _maCand = fp_floatToFixed32(_maxAccel * delT * delT);
+  // // and check againt our abs-max, 
+  // if(_mvCand > absMaxRate) _mvCand = absMaxRate;
+  // if(_maCand > absMaxRate) _maCand = absMaxRate;
+  // // and stash as 
+  // noInterrupts();
+  // maxVel = _mvCand;
+  // maxAccel = _maCand;
+  // posTarget = fp_floatToFixed64(_targ);
+  // mode = MOTION_MODE_POS;
+  // interrupts();
+}
+
+void motion_setVelocityTarget(float _targ, float _maxAccel){
+  // fpint32_t _maCand = fp_floatToFixed32(_maxAccel * delT * delT);
+  // if(_maCand > absMaxRate) _maCand = absMaxRate;
+  // noInterrupts();
+  // maxAccel = _maCand;
+  // velTarget = fp_floatToFixed32(delT * _targ);
+  // mode = MOTION_MODE_VEL;
+  // interrupts();
+}
+
+void motion_setPosition(float _pos){
+  // not too introspective here,
+  // pos = fp_floatToFixed64(_pos);
 }
